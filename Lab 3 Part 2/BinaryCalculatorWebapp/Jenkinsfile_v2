@@ -1,0 +1,124 @@
+pipeline {
+  environment {
+    // All values are read from Jenkins credentials so that no project
+    // specific information is committed to the repository.
+    PROJECT_ID   = credentials('project_id')
+    REPO_PATH    = credentials('repo_path')
+    CLUSTER_NAME = credentials('cluster_name')
+    CLUSTER_ZONE = credentials('cluster_zone')
+    SERVICE_ACCOUNT = credentials('service_account')
+
+    APP_NAME  = "binary-calculator"
+    IMAGE_TAG = "${REPO_PATH}/${APP_NAME}:${env.BUILD_NUMBER}"
+    PORT      = "8080"
+  }
+
+  agent {
+    kubernetes {
+      label 'sample-app'
+      defaultContainer 'jnlp'
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    component: ci
+spec:
+  # Use the service account that can deploy to all namespaces
+  serviceAccountName: cd-jenkins
+  containers:
+  - name: gcloud
+    image: google/cloud-sdk:latest
+    command:
+    - cat
+    tty: true
+"""
+    }
+  }
+
+  tools {
+    maven 'maven'
+  }
+
+  stages {
+
+    stage('test') {
+      steps {
+        sh 'mvn clean test -f "./Lab 3 Part 2/BinaryCalculatorWebapp/pom.xml"'
+      }
+    }
+
+    stage('build') {
+      steps {
+        sh 'mvn package -DskipTests -f "./Lab 3 Part 2/BinaryCalculatorWebapp/pom.xml"'
+      }
+    }
+
+    stage('containerize') {
+      steps {
+        container('gcloud') {
+          sh """
+            gcloud auth activate-service-account --key-file=${SERVICE_ACCOUNT}
+            gcloud config set project ${PROJECT_ID}
+            gcloud builds submit -t ${IMAGE_TAG} "./Lab 3 Part 2/BinaryCalculatorWebapp/"
+          """
+        }
+      }
+    }
+
+    stage('deployment') {
+      steps {
+        container('gcloud') {
+          sh """
+            gcloud auth activate-service-account --key-file=${SERVICE_ACCOUNT}
+            gcloud config set project ${PROJECT_ID}
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --zone ${CLUSTER_ZONE}
+
+            # Remove any previous deployment, then recreate it with the new image
+            kubectl delete deployment ${APP_NAME} --ignore-not-found=true
+            kubectl create deployment ${APP_NAME} --image=${IMAGE_TAG}
+            kubectl rollout status deployment/${APP_NAME} --timeout=180s
+          """
+        }
+      }
+    }
+
+    stage('service') {
+      steps {
+        container('gcloud') {
+          sh """
+            gcloud auth activate-service-account --key-file=${SERVICE_ACCOUNT}
+            gcloud config set project ${PROJECT_ID}
+            gcloud container clusters get-credentials ${CLUSTER_NAME} --zone ${CLUSTER_ZONE}
+
+            # Create the load balancer only if it does not already exist
+            if ! kubectl get service ${APP_NAME} > /dev/null 2>&1; then
+              kubectl expose deployment ${APP_NAME} \
+                --type=LoadBalancer --port=${PORT} --target-port=${PORT}
+            fi
+
+            # Wait for the external IP to be assigned, then print it
+            echo "Waiting for the load balancer to receive an external IP..."
+            for i in \$(seq 1 30); do
+              IP=\$(kubectl get service ${APP_NAME} \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+              if [ -n "\$IP" ]; then
+                echo "Application is available at: http://\$IP:${PORT}"
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "The external IP was not assigned within the timeout."
+            kubectl get service ${APP_NAME}
+          """
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "Pipeline finished with status: ${currentBuild.currentResult}"
+    }
+  }
+}

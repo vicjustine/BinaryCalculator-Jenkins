@@ -1,0 +1,23 @@
+# Build output
+target/
+*.class
+*.war
+*.jar
+
+# Never commit credentials
+*.json
+service_account.json
+!package.json
+
+# Editors / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Large media - videos are submitted via the report links
+*.mp4
+*.mov
+
+# Report is submitted separately
+report/
